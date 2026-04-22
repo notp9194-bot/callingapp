@@ -1,0 +1,92 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mobile-app/**"
+      - ".github/workflows/build-android.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile-app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install npm deps
+        run: npm install
+
+      - name: Add Android platform (if missing)
+        run: |
+          if [ ! -d android ]; then
+            npx cap add android
+          fi
+
+      - name: Drop google-services.json from secret
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          mkdir -p android/app
+          echo "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Patch AndroidManifest with permissions
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          for PERM in CAMERA RECORD_AUDIO MODIFY_AUDIO_SETTINGS BLUETOOTH BLUETOOTH_CONNECT FOREGROUND_SERVICE WAKE_LOCK VIBRATE USE_FULL_SCREEN_INTENT POST_NOTIFICATIONS DISABLE_KEYGUARD TURN_SCREEN_ON; do
+            if ! grep -q "android.permission.$PERM" $MANIFEST; then
+              sed -i "/<\/manifest>/i\    <uses-permission android:name=\"android.permission.$PERM\" />" $MANIFEST
+            fi
+          done
+          if ! grep -q "android.hardware.camera" $MANIFEST; then
+            sed -i "/<\/manifest>/i\    <uses-feature android:name=\"android.hardware.camera\" android:required=\"false\" />" $MANIFEST
+          fi
+          if ! grep -q "android.hardware.microphone" $MANIFEST; then
+            sed -i "/<\/manifest>/i\    <uses-feature android:name=\"android.hardware.microphone\" android:required=\"false\" />" $MANIFEST
+          fi
+          cat $MANIFEST 
+
+      - name: Patch Android Gradle for Firebase
+        run: |
+          # Add google-services classpath to project build.gradle
+          if ! grep -q "com.google.gms:google-services" android/build.gradle; then
+            sed -i "/dependencies {/a\        classpath 'com.google.gms:google-services:4.4.2'" android/build.gradle
+          fi
+          # Apply google-services plugin in app build.gradle
+          if ! grep -q "com.google.gms.google-services" android/app/build.gradle; then
+            echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
+          fi
+          # Add Firebase BoM + messaging dependency
+          if ! grep -q "firebase-messaging" android/app/build.gradle; then
+            sed -i "/dependencies {/a\    implementation platform('com.google.firebase:firebase-bom:33.7.0')\n    implementation 'com.google.firebase:firebase-messaging'" android/app/build.gradle
+          fi
+
+      - name: Build debug APK
+        run: cd android && ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: callingapp-debug-apk
+          path: mobile-app/android/app/build/outputs/apk/debug/app-debug.apk
